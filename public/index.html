@@ -33,6 +33,10 @@
             --border: rgba(255, 255, 255, 0.1);
         }
 
+        [v-cloak] {
+            display: none !important;
+        }
+
         body {
             background-color: var(--bg-color);
             color: var(--text-main);
@@ -1251,7 +1255,7 @@
 
                 <label class="password-remember">
                     <input type="checkbox" id="remember-password" checked>
-                    <span>记住登录状态 (30天)</span>
+                    <span>记住登录状态 (1年)</span>
                 </label>
 
                 <button type="submit" class="password-submit" id="password-submit-btn">
@@ -1262,7 +1266,7 @@
         </div>
     </div>
 
-    <div id="app">
+    <div id="app" v-cloak>
 
         <nav class="navbar-custom" :class="{ 'scrolled': scrollY > 50 }" v-show="!searched">
             <div class="brand" @click="goHome" style="cursor: pointer;">E视界 <span
@@ -1666,19 +1670,22 @@
                 if (data.success) {
                     // Save auth state
                     if (remember) {
-                        const expiry = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
+                        const expiry = Date.now() + (365 * 24 * 60 * 60 * 1000); // 365 days
                         localStorage.setItem(AUTH_STORAGE_KEY, passwordHash);
                         localStorage.setItem(AUTH_EXPIRY_KEY, expiry.toString());
+                    }
+
+                    // Start App and wait for data
+                    if (window.startApp) {
+                        await window.startApp();
                     }
 
                     // Hide password screen with animation
                     const screen = document.getElementById('password-screen');
                     screen.classList.add('hidden');
 
-                    // Start app
                     setTimeout(() => {
                         screen.style.display = 'none';
-                        window.startApp && window.startApp();
                     }, 500);
                 } else {
                     showPasswordError('密码错误，请重试');
@@ -1765,7 +1772,7 @@
         // TMDb URL 配置 (可根据用户地区动态切换)
         // 默认使用官方地址
         let TMDB_BASE_URL = "https://api.themoviedb.org/3";
-        let TMDB_IMG_URL = "https://image.tmdb.org/t/p/w500";
+        let TMDB_IMG_URL = "https://image.tmdb.org/t/p/w342";
         let TMDB_BACKDROP_URL = "https://image.tmdb.org/t/p/original";
 
         // TMDB 反代配置现在通过环境变量 TMDB_PROXY_URL 配置
@@ -1853,7 +1860,7 @@
 
                 // 定义 startApp 函数供密码验证成功后调用
                 window.startApp = () => {
-                    this.initApp();
+                    return this.initApp();
                 };
             },
             computed: {
@@ -1916,7 +1923,7 @@
 
                     // 2. 如果获取到了 Key，加载数据
                     if (TMDB_API_KEY) {
-                        this.fetchHero();
+                        await this.fetchHero();
                         this.fetchAllLists();
                     } else {
                         console.warn('TMDB_API_KEY 未配置');
@@ -1926,7 +1933,7 @@
                     setTimeout(() => {
                         const loader = document.getElementById('app-loader');
                         if (loader) loader.classList.add('hidden');
-                    }, 800);
+                    }, 300);
 
                     // 4. 加载站点信息（用于客户端测速）
                     try {
@@ -1983,20 +1990,40 @@
 
                 // 设置 TMDB 反代（针对大陆用户）
                 async setupTmdbProxy(proxyUrl) {
+                    let isCN = false;
                     try {
-                        const res = await fetch('https://ipapi.co/json/', { timeout: 3000 });
-                        const data = await res.json();
-
-                        if (data.country_code === 'CN') {
-                            console.log('[IP检测] 检测到大陆IP，启用TMDB反代:', proxyUrl);
-                            TMDB_BASE_URL = proxyUrl + '/api/3';
-                            TMDB_IMG_URL = proxyUrl + '/t/p/w500';
-                            TMDB_BACKDROP_URL = proxyUrl + '/t/p/original';
+                        // 1. 优先使用 Cloudflare Trace (稳定、无速率限制)
+                        const res = await fetch('https://www.cloudflare.com/cdn-cgi/trace', { timeout: 3000 });
+                        if (res.ok) {
+                            const text = await res.text();
+                            const matches = text.match(/loc=([A-Z]+)/);
+                            if (matches && matches[1] === 'CN') isCN = true;
                         } else {
-                            console.log('[IP检测] 非大陆IP，使用官方地址');
+                            throw new Error('CF Trace Status: ' + res.status);
                         }
                     } catch (e) {
-                        console.warn('[IP检测] 检测失败，使用默认配置', e);
+                        // 2. 降级到 ipapi.co (有速率限制，仅作为备选)
+                        console.log('[IP检测] CF Trace 失败，尝试 ipapi.co...');
+                        try {
+                            const res = await fetch('https://ipapi.co/json/', { timeout: 3000 });
+                            if (res.ok) {
+                                const data = await res.json();
+                                if (data.country_code === 'CN') isCN = true;
+                            } else {
+                                console.warn('[IP检测] ipapi.co 响应异常:', res.status);
+                            }
+                        } catch (e2) {
+                            console.warn('[IP检测] 所有接口均失败，无法自动切换线路', e2);
+                        }
+                    }
+
+                    if (isCN) {
+                        console.log('[IP检测] 检测到大陆IP，启用TMDB反代:', proxyUrl);
+                        TMDB_BASE_URL = proxyUrl + '/api/3';
+                        TMDB_IMG_URL = proxyUrl + '/t/p/w342';
+                        TMDB_BACKDROP_URL = proxyUrl + '/t/p/original';
+                    } else {
+                        console.log('[IP检测] 非大陆IP或检测完成，保持官方地址');
                     }
                 },
 
@@ -2081,7 +2108,7 @@
                 },
 
                 fetchHero() {
-                    fetch(`${TMDB_BASE_URL}/trending/all/week?api_key=${TMDB_API_KEY}&language=zh-CN`)
+                    return fetch(`${TMDB_BASE_URL}/trending/all/week?api_key=${TMDB_API_KEY}&language=zh-CN`)
                         .then(res => res.json())
                         .then(data => {
                             if (data.results) {
